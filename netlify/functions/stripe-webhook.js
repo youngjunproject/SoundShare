@@ -81,16 +81,23 @@ exports.handler = async function (event, context) {
         };
       }
 
-      // Directly update the download_tokens table
+      // Get current tokens
+      const { data: currentTokens, error: getError } = await supabaseAdmin
+        .from("download_tokens")
+        .select("tokens_remaining")
+        .eq("user_id", userId)
+        .single();
+
+      const currentAmount = currentTokens?.tokens_remaining || 0;
+      const newAmount = currentAmount + parseInt(tokens, 10);
+
+      // Update tokens
       const { data: tokenData, error: tokenError } = await supabaseAdmin
         .from("download_tokens")
         .upsert(
           {
             user_id: userId,
-            tokens_remaining: supabaseAdmin.sql`COALESCE(tokens_remaining, 0) + ${parseInt(
-              tokens,
-              10
-            )}`,
+            tokens_remaining: newAmount,
             updated_at: new Date().toISOString(),
           },
           {
@@ -114,7 +121,7 @@ exports.handler = async function (event, context) {
           user_id: userId,
           operation_type: "purchase",
           tokens_changed: parseInt(tokens, 10),
-          tokens_remaining: tokenData[0].tokens_remaining,
+          tokens_remaining: newAmount,
         });
 
       if (auditError) {
@@ -125,14 +132,14 @@ exports.handler = async function (event, context) {
       console.log("Purchase successful:", {
         userId,
         tokens,
-        newBalance: tokenData[0].tokens_remaining,
+        newBalance: newAmount,
       });
 
       return {
         statusCode: 200,
         body: JSON.stringify({
           success: true,
-          tokens: tokenData[0].tokens_remaining,
+          tokens: newAmount,
         }),
       };
     }
