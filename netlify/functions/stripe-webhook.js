@@ -1,29 +1,63 @@
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require("@supabase/supabase-js");
 
-// Initialize Supabase client with service role key
-const supabase = createClient(
-  process.env.VITE_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY,
-  {
+// Helper to validate environment variables
+function getRequiredEnvVar(name) {
+  const value = process.env[name];
+  if (!value) {
+    console.error(`Missing required environment variable: ${name}`);
+    throw new Error(`${name} environment variable is required`);
+  }
+  return value;
+}
+
+// Get required environment variables
+const supabaseUrl = getRequiredEnvVar("VITE_SUPABASE_URL");
+const supabaseServiceKey = getRequiredEnvVar("SUPABASE_SERVICE_KEY");
+const stripeWebhookSecret = getRequiredEnvVar("STRIPE_WEBHOOK_SECRET");
+
+// Initialize Supabase client
+let supabaseClient;
+try {
+  supabaseClient = createClient(supabaseUrl, supabaseServiceKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
     },
-  }
-);
+  });
+} catch (error) {
+  console.error("Failed to initialize Supabase client:", error);
+  throw error;
+}
 
 exports.handler = async function (event, context) {
+  console.log("Webhook received:", {
+    method: event.httpMethod,
+    headers: event.headers,
+    envVars: {
+      supabaseUrl: supabaseUrl ? "present" : "missing",
+      supabaseKey: supabaseServiceKey ? "present" : "missing",
+      webhookSecret: stripeWebhookSecret ? "present" : "missing",
+    },
+  });
+
+  if (event.httpMethod !== "POST") {
+    return {
+      statusCode: 405,
+      body: JSON.stringify({ error: "Method not allowed" }),
+    };
+  }
+
   const sig = event.headers["stripe-signature"];
   let stripeEvent;
 
   try {
-    // Verify webhook signature
     stripeEvent = stripe.webhooks.constructEvent(
       event.body,
       sig,
-      process.env.STRIPE_WEBHOOK_SECRET
+      stripeWebhookSecret
     );
+    console.log("Stripe event verified:", stripeEvent.type);
   } catch (err) {
     console.error("Webhook signature verification failed:", err.message);
     return {
@@ -32,15 +66,14 @@ exports.handler = async function (event, context) {
     };
   }
 
-  // Handle the checkout.session.completed event
   if (stripeEvent.type === "checkout.session.completed") {
     const session = stripeEvent.data.object;
+    console.log("Processing checkout session:", session.id);
 
-    // Extract user ID and token amount from metadata
     const { userId, tokens } = session.metadata;
 
     if (!userId || !tokens) {
-      console.error("Missing required metadata:", { userId, tokens });
+      console.error("Missing metadata:", session.metadata);
       return {
         statusCode: 400,
         body: JSON.stringify({ error: "Missing required metadata" }),
@@ -48,40 +81,40 @@ exports.handler = async function (event, context) {
     }
 
     try {
-      // Call the purchase_tokens function
-      const { data, error } = await supabase.rpc("purchase_tokens", {
+      console.log("Calling purchase_tokens:", { userId, tokens });
+
+      const { data, error } = await supabaseClient.rpc("purchase_tokens", {
         user_id: userId,
         amount: parseInt(tokens, 10),
       });
 
       if (error) {
-        console.error("Token purchase error:", error);
-        return {
-          statusCode: 500,
-          body: JSON.stringify({ error: "Failed to process token purchase" }),
-        };
+        console.error("Purchase tokens error:", error);
+        throw error;
       }
 
-      console.log("Token purchase successful:", {
-        userId,
-        tokens,
-        success: data,
-      });
+      console.log("Purchase successful:", { userId, tokens, result: data });
 
       return {
         statusCode: 200,
-        body: JSON.stringify({ received: true, processed: true }),
+        body: JSON.stringify({
+          received: true,
+          processed: true,
+          tokens: parseInt(tokens, 10),
+        }),
       };
     } catch (error) {
-      console.error("Token purchase processing error:", error);
+      console.error("Failed to process purchase:", error);
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: "Failed to process token purchase" }),
+        body: JSON.stringify({
+          error: "Failed to process token purchase",
+          details: error.message,
+        }),
       };
     }
   }
 
-  // Return success for other event types
   return {
     statusCode: 200,
     body: JSON.stringify({ received: true }),
