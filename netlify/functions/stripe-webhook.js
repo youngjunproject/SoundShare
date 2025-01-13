@@ -13,7 +13,7 @@ function getRequiredEnvVar(name) {
 
 // Get required environment variables
 const supabaseUrl = getRequiredEnvVar("VITE_SUPABASE_URL");
-const supabaseServiceKey = getRequiredEnvVar("SUPABASE_SERVICE_KEY");
+const supabaseServiceKey = getRequiredEnvVar("SUPABASE_SERVICE_ROLE_KEY"); // Changed to use service role key
 const stripeWebhookSecret = getRequiredEnvVar("STRIPE_WEBHOOK_SECRET");
 
 // Initialize Supabase client
