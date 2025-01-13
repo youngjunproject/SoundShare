@@ -13,7 +13,7 @@ function getRequiredEnvVar(name) {
 
 // Get required environment variables
 const supabaseUrl = getRequiredEnvVar("VITE_SUPABASE_URL");
-const supabaseServiceKey = getRequiredEnvVar("SUPABASE_SERVICE_ROLE_KEY"); // CRITICAL: Must use service role key
+const supabaseServiceKey = getRequiredEnvVar("SUPABASE_SERVICE_ROLE_KEY");
 const stripeWebhookSecret = getRequiredEnvVar("STRIPE_WEBHOOK_SECRET");
 
 // Initialize Supabase client with service role key
@@ -42,7 +42,6 @@ exports.handler = async function (event, context) {
         sig,
         stripeWebhookSecret
       );
-      console.log("Stripe event verified:", stripeEvent.type);
     } catch (err) {
       console.error("Webhook signature verification failed:", err.message);
       return {
@@ -51,11 +50,13 @@ exports.handler = async function (event, context) {
       };
     }
 
+    // Only process completed checkout sessions
     if (stripeEvent.type === "checkout.session.completed") {
       const session = stripeEvent.data.object;
-      console.log("Processing checkout session:", session.id);
 
-      const { userId, tokens } = session.metadata;
+      // Extract metadata
+      const userId = session.metadata?.userId;
+      const tokens = session.metadata?.tokens;
 
       if (!userId || !tokens) {
         console.error("Missing metadata:", session.metadata);
@@ -65,71 +66,79 @@ exports.handler = async function (event, context) {
         };
       }
 
-      try {
-        console.log("Calling purchase_tokens:", { userId, tokens });
+      // First verify the user exists
+      const { data: user, error: userError } = await supabaseAdmin
+        .from("profiles")
+        .select("id")
+        .eq("id", userId)
+        .single();
 
-        // Call the purchase_tokens RPC function with retries
-        let retries = 3;
-        let success = false;
-        let error;
-
-        while (retries > 0 && !success) {
-          const { data, error: rpcError } = await supabaseAdmin.rpc(
-            "purchase_tokens",
-            {
-              user_id: userId,
-              amount: parseInt(tokens, 10),
-            }
-          );
-
-          if (rpcError) {
-            error = rpcError;
-            console.error(
-              `Purchase tokens error (attempt ${4 - retries}):`,
-              rpcError
-            );
-            retries--;
-            if (retries > 0) {
-              await new Promise((resolve) => setTimeout(resolve, 1000));
-            }
-          } else {
-            success = true;
-            console.log("Purchase successful:", {
-              userId,
-              tokens,
-              result: data,
-            });
-          }
-        }
-
-        if (!success) {
-          throw error;
-        }
-
+      if (userError || !user) {
+        console.error("User verification failed:", userError);
         return {
-          statusCode: 200,
-          body: JSON.stringify({
-            received: true,
-            processed: true,
-            tokens: parseInt(tokens, 10),
-          }),
-        };
-      } catch (error) {
-        console.error("Failed to process purchase:", error);
-        return {
-          statusCode: 500,
-          body: JSON.stringify({
-            error: "Failed to process token purchase",
-            details: error.message,
-          }),
+          statusCode: 400,
+          body: JSON.stringify({ error: "Invalid user" }),
         };
       }
+
+      // Directly update the download_tokens table
+      const { data: tokenData, error: tokenError } = await supabaseAdmin
+        .from("download_tokens")
+        .upsert(
+          {
+            user_id: userId,
+            tokens_remaining: supabaseAdmin.sql`COALESCE(tokens_remaining, 0) + ${parseInt(
+              tokens,
+              10
+            )}`,
+            updated_at: new Date().toISOString(),
+          },
+          {
+            onConflict: "user_id",
+            returning: "full",
+          }
+        );
+
+      if (tokenError) {
+        console.error("Token update failed:", tokenError);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({ error: "Failed to update tokens" }),
+        };
+      }
+
+      // Log the purchase in the audit log
+      const { error: auditError } = await supabaseAdmin
+        .from("token_audit_log")
+        .insert({
+          user_id: userId,
+          operation_type: "purchase",
+          tokens_changed: parseInt(tokens, 10),
+          tokens_remaining: tokenData[0].tokens_remaining,
+        });
+
+      if (auditError) {
+        console.error("Audit log failed:", auditError);
+        // Don't fail the whole operation if just the audit log fails
+      }
+
+      console.log("Purchase successful:", {
+        userId,
+        tokens,
+        newBalance: tokenData[0].tokens_remaining,
+      });
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          success: true,
+          tokens: tokenData[0].tokens_remaining,
+        }),
+      };
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ received: true }),
-    };
+    // Acknowledge other events
+    return { statusCode: 200, body: JSON.stringify({ received: true }) };
   } catch (err) {
     console.error("Webhook processing error:", err);
     return {

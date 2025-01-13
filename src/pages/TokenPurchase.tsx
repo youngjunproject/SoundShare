@@ -7,7 +7,6 @@ import { getTokensRemaining, getTokenHistory } from "../lib/tokens";
 import { formatDistanceToNow } from "date-fns";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
-// Initialize Stripe outside of component to avoid re-initialization
 const stripePromise = import.meta.env.VITE_STRIPE_PUBLIC_KEY
   ? loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY)
   : Promise.reject(new Error("Stripe public key not found"));
@@ -48,42 +47,16 @@ export function TokenPurchase() {
     await Promise.all([loadTokens(), loadHistory()]);
   };
 
+  // Handle payment status and setup real-time updates
   useEffect(() => {
-    const checkPaymentStatus = async () => {
-      const success = searchParams.get("success");
-      const canceled = searchParams.get("canceled");
-      const sessionId = searchParams.get("session_id");
-
-      if (success && sessionId) {
-        // Wait a moment for the webhook to process
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        await reloadData();
-        alert(
-          "Payment successful! Your tokens have been added to your account."
-        );
-        // Clean up URL parameters
-        navigate("/tokens", { replace: true });
-      } else if (canceled) {
-        alert("Payment canceled. No tokens were purchased.");
-        navigate("/tokens", { replace: true });
-      }
-    };
-
-    reloadData();
-    checkPaymentStatus();
-  }, [searchParams, navigate]);
-
-  // Set up real-time subscription for token updates
-  useEffect(() => {
-    let subscription: any;
-
-    const setupSubscription = async () => {
+    const setupRealtimeSubscription = async () => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
 
-      subscription = supabase
+      // Subscribe to token changes
+      const channel = supabase
         .channel("token-updates")
         .on(
           "postgres_changes",
@@ -93,21 +66,41 @@ export function TokenPurchase() {
             table: "download_tokens",
             filter: `user_id=eq.${user.id}`,
           },
-          () => {
-            reloadData();
+          async (payload) => {
+            console.log("Token update received:", payload);
+            await reloadData();
           }
         )
         .subscribe();
+
+      return () => {
+        channel.unsubscribe();
+      };
     };
 
-    setupSubscription();
+    const checkPaymentStatus = async () => {
+      const success = searchParams.get("success");
+      const sessionId = searchParams.get("session_id");
+      const canceled = searchParams.get("canceled");
 
-    return () => {
-      if (subscription) {
-        subscription.unsubscribe();
+      if (success && sessionId) {
+        // Wait a moment for webhook processing
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        await reloadData();
+        alert(
+          "Payment successful! Your tokens have been added to your account."
+        );
+        navigate("/tokens", { replace: true });
+      } else if (canceled) {
+        alert("Payment canceled. No tokens were purchased.");
+        navigate("/tokens", { replace: true });
       }
     };
-  }, []);
+
+    setupRealtimeSubscription();
+    reloadData();
+    checkPaymentStatus();
+  }, [searchParams, navigate]);
 
   const handlePurchase = async (tokens: number, price: number) => {
     try {
@@ -121,12 +114,7 @@ export function TokenPurchase() {
         throw new Error("Please sign in to purchase tokens");
       }
 
-      const stripe = await stripePromise.catch((err) => {
-        throw new Error(
-          "Failed to initialize payment system. Please try again later."
-        );
-      });
-
+      const stripe = await stripePromise;
       if (!stripe) {
         throw new Error(
           "Payment system is not available. Please try again later."
@@ -148,41 +136,27 @@ export function TokenPurchase() {
         }
       );
 
-      const errorMessage = "Failed to create checkout session";
+      const data = await response.json();
 
-      try {
-        const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to create checkout session");
+      }
 
-        if (!response.ok) {
-          throw new Error(data.error || errorMessage);
-        }
+      if (!data?.id) {
+        throw new Error("Invalid checkout session response");
+      }
 
-        if (!data?.id) {
-          throw new Error("Invalid checkout session response");
-        }
+      const { error: stripeError } = await stripe.redirectToCheckout({
+        sessionId: data.id,
+      });
 
-        const { error: stripeError } = await stripe.redirectToCheckout({
-          sessionId: data.id,
-        });
-
-        if (stripeError) {
-          throw stripeError;
-        }
-      } catch (parseError) {
-        console.error("Response parsing error:", parseError);
-        if (!response.ok) {
-          throw new Error(
-            `${errorMessage} (${response.status}: ${response.statusText})`
-          );
-        }
-        throw new Error("Invalid response from payment server");
+      if (stripeError) {
+        throw stripeError;
       }
     } catch (err) {
       console.error("Purchase error:", err);
       setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to process purchase. Please try again."
+        err instanceof Error ? err.message : "Failed to process purchase"
       );
     } finally {
       setLoading(false);
