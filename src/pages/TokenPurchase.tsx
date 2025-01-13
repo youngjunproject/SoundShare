@@ -5,6 +5,7 @@ import { loadStripe } from "@stripe/stripe-js";
 import { supabase } from "../lib/supabase";
 import { getTokensRemaining, getTokenHistory } from "../lib/tokens";
 import { formatDistanceToNow } from "date-fns";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 // Initialize Stripe outside of component to avoid re-initialization
 const stripePromise = import.meta.env.VITE_STRIPE_PUBLIC_KEY
@@ -30,6 +31,8 @@ export function TokenPurchase() {
       created_at: string;
     }>
   >([]);
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   const loadTokens = async () => {
     const tokens = await getTokensRemaining();
@@ -47,22 +50,63 @@ export function TokenPurchase() {
 
   useEffect(() => {
     const checkPaymentStatus = async () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      if (urlParams.get("success")) {
+      const success = searchParams.get("success");
+      const canceled = searchParams.get("canceled");
+      const sessionId = searchParams.get("session_id");
+
+      if (success && sessionId) {
+        // Wait a moment for the webhook to process
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         await reloadData();
         alert(
           "Payment successful! Your tokens have been added to your account."
         );
         // Clean up URL parameters
-        window.history.replaceState({}, "", window.location.pathname);
-      } else if (urlParams.get("canceled")) {
+        navigate("/tokens", { replace: true });
+      } else if (canceled) {
         alert("Payment canceled. No tokens were purchased.");
-        window.history.replaceState({}, "", window.location.pathname);
+        navigate("/tokens", { replace: true });
       }
     };
 
     reloadData();
     checkPaymentStatus();
+  }, [searchParams, navigate]);
+
+  // Set up real-time subscription for token updates
+  useEffect(() => {
+    let subscription: any;
+
+    const setupSubscription = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      subscription = supabase
+        .channel("token-updates")
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "download_tokens",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => {
+            reloadData();
+          }
+        )
+        .subscribe();
+    };
+
+    setupSubscription();
+
+    return () => {
+      if (subscription) {
+        subscription.unsubscribe();
+      }
+    };
   }, []);
 
   const handlePurchase = async (tokens: number, price: number) => {
