@@ -3,17 +3,18 @@ export interface Sound {
   title: string;
   description: string;
   audio_url: string;
-  cover_url: string;
+  cover_url?: string;
   user_id: string;
   username: string;
   created_at: string;
   upvotes: number;
   downvotes: number;
   duration: number;
+  comment_count: number;
   mime_type?: string;
   file_size?: number;
   processed: boolean;
-  processing_status: 'pending' | 'processing' | 'completed' | 'failed';
+  processing_status: "pending" | "processing" | "completed" | "failed";
 }
 
 export interface Vote {
@@ -31,6 +32,8 @@ export interface Comment {
   username: string;
   content: string;
   created_at: string;
+  updated_at: string;
+  parent_id?: string;
 }
 
 export interface Profile {
@@ -38,7 +41,11 @@ export interface Profile {
   username: string;
   avatar_url: string;
   bio: string;
+  created_at: string;
   followers_count: number;
   following_count: number;
   sounds_count: number;
+  instagram_url?: string;
+  youtube_url?: string;
+  spotify_url?: string;
 }
